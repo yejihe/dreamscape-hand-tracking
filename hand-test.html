@@ -9,13 +9,13 @@ button{border:0;border-radius:13px;padding:13px 14px;background:#87bbff;color:#0
 #note{position:fixed;bottom:105px;left:10px;right:10px;z-index:2;font-size:12px;color:#e3ecfa;background:#081527ba;padding:7px 10px;border-radius:9px}
 </style></head>
 <body><div id="scene"><video id="video" autoplay muted playsinline></video><canvas id="overlay"></canvas></div>
-<div id="top"><h1>🌌 Dreamscape · 捏合识别实验 R11</h1><div id="state">尚未启动</div><div id="info">点击「启动摄像头」，对准一只手。捏合拇指和食指会出现红色轨迹。</div></div>
+<div id="top"><h1>🌌 Dreamscape · 捏合识别实验 R12</h1><div id="state">尚未启动</div><div id="info">点击「启动摄像头」，对准一只手。捏合拇指和食指会出现红色轨迹。</div></div>
 <div id="note">当前仅验证视觉手势＋屏幕二维轨迹；不代表 ARCore 三维定位或 VR 已完成。请先不要购买硬件。</div>
 <div id="bottom"><button id="start">启动摄像头</button><button class="secondary" id="clear">清除轨迹</button><button class="secondary" id="flip">切换镜头</button><button class="secondary" id="mirror">镜像：开</button></div>
 <script type="module">
 const video=document.querySelector('#video'),canvas=document.querySelector('#overlay'),ctx=canvas.getContext('2d');
 const state=document.querySelector('#state'),info=document.querySelector('#info'),start=document.querySelector('#start');
-let model,stream,active=false,busy=false,face='user',lastT=-1,lastFrame=-1,down=false,points=[],strokes=[],lastDraw=0,miss=0,mirror=true;
+let model,stream,active=false,busy=false,face='user',lastT=-1,lastFrame=-1,down=false,points=[],strokes=[],lastDraw=0,miss=0,mirror=true,switching=false;
 function status(s){state.textContent=s}
 function resize(){const r=canvas.getBoundingClientRect(),d=Math.min(devicePixelRatio||1,2);canvas.width=Math.round(r.width*d);canvas.height=Math.round(r.height*d);ctx.setTransform(d,0,0,d,0,0)}
 window.addEventListener('resize',resize);resize();
@@ -38,31 +38,41 @@ async function init(){
  if(initializing){status('正在启动中，请看这里的进度提示');return}
  initializing=true;start.textContent='启动中…';
  try{
-  status('R11 · 第一步：申请摄像头权限');
+  status('R12 · 第一步：申请摄像头权限');
   await timeout(camera(),12000,'摄像头启动');
-  status('R11 · 摄像头已开启，准备模型');
+  status('R12 · 摄像头已开启，准备模型');
   const base=new URL('./vendor/mediapipe/',document.baseURI);
   const mod=await timeout(import(base.href+'vision_bundle.mjs'),15000,'识别程序加载');
-  status('R11 · 加载识别引擎');
+  status('R12 · 加载识别引擎');
   const vision=await timeout(mod.FilesetResolver.forVisionTasks(base.href),15000,'WASM 加载');
-  status('R11 · 初始化手部模型');
+  status('R12 · 初始化手部模型');
   model=await timeout(mod.HandLandmarker.createFromOptions(vision,{baseOptions:{modelAssetPath:base.href+'hand_landmarker.task',delegate:'CPU'},runningMode:'VIDEO',numHands:1,minHandDetectionConfidence:.55,minTrackingConfidence:.5}),30000,'模型初始化');
-  active=true;status('R11 · 已启动！请伸出手');requestAnimationFrame(loop);
+  active=true;status('R12 · 已启动！请伸出手');requestAnimationFrame(loop);
   start.textContent='已启动';
  }catch(e){
-  status('R11 启动失败：'+e.message);
+  status('R12 启动失败：'+e.message);
   info.textContent='故障阶段：'+(e.stack||String(e)).slice(0,500);
   start.textContent='重新尝试';
  }finally{initializing=false}
 }
-async function camera(){
-if(stream)stream.getTracks().forEach(t=>t.stop());
-stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:face},width:{ideal:640},height:{ideal:480},frameRate:{ideal:30}}});
-video.srcObject=stream;await video.play();lastFrame=-1;
+async function camera(target=face){
+const previous=stream;
+if(previous){previous.getTracks().forEach(t=>t.stop());video.pause();video.srcObject=null;}
+let fresh;
+try{
+ fresh=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:target},width:{ideal:640},height:{ideal:480},frameRate:{ideal:30}}});
+ video.srcObject=fresh;
+ await video.play();
+ if(!video.videoWidth)await new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(new Error('摄像头画面未就绪')),5000);video.addEventListener('loadedmetadata',()=>{clearTimeout(timer);resolve()},{once:true})});
+ stream=fresh;lastFrame=-1;miss=0;return;
+}catch(err){
+ fresh?.getTracks().forEach(t=>t.stop());
+ video.srcObject=null;stream=null;throw err;
+}
 }
 async function loop(){
 if(!active)return;requestAnimationFrame(loop);
-if(busy || video.readyState<2 || video.currentTime===lastFrame)return;
+if(switching || busy || video.readyState<2 || video.currentTime===lastFrame)return;
 busy=true;lastFrame=video.currentTime;
 try{
 const now=performance.now(),res=model.detectForVideo(video,now),lm=res.landmarks?.[0];
@@ -81,7 +91,19 @@ finally{busy=false}
 }
 start.addEventListener('click',init);
 document.querySelector('#clear').addEventListener('click',()=>{strokes=[];points=[];paint(null)});
-document.querySelector('#flip').addEventListener('click',async()=>{if(!active)return;face=face==='user'?'environment':'user';mirror=face==='user';syncMirror();down=false;points=[];try{await camera();status('镜头已切换')}catch(e){status('切换失败：'+e.message)}});
+document.querySelector('#flip').addEventListener('click',async()=>{
+ if(!active||switching)return;
+ const button=document.querySelector('#flip'),prevFace=face,prevMirror=mirror,target=face==='user'?'environment':'user';
+ switching=true;button.disabled=true;button.textContent='切换中…';down=false;points=[];status('正在切换摄像头…');
+ try{
+  await camera(target);face=target;mirror=face==='user';syncMirror();
+  strokes=[];paint(null);status('✅ 已切换到'+(face==='user'?'前置':'后置')+'摄像头');
+ }catch(e){
+  status('切换失败：'+e.message+'；正在尝试恢复原镜头');
+  try{await camera(prevFace);face=prevFace;mirror=prevMirror;syncMirror();status('已恢复原镜头；切换失败：'+e.message)}
+  catch(e2){active=false;start.textContent='重新尝试';status('镜头无法恢复：'+e2.message)}
+ }finally{switching=false;button.disabled=false;button.textContent='切换镜头'}
+});
 document.querySelector('#mirror').addEventListener('click',()=>{mirror=!mirror;syncMirror();strokes=[];points=[];down=false;paint(null);status('镜像已切换，已清除旧轨迹以避免反向叠加')});
 window.addEventListener('pagehide',()=>stream?.getTracks().forEach(t=>t.stop()));
 </script></body></html>
