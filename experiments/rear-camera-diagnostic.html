@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Dreamscape Hand · 后置摄像头诊断</title>
+<style>body{background:#0a1424;color:#fff;font:15px system-ui;padding:16px}button{margin:5px;padding:14px;border:0;border-radius:12px;background:#93c9fc}video{display:block;width:100%;max-height:55vh;background:#000;border-radius:12px;object-fit:contain}pre{white-space:pre-wrap;word-break:break-word;font-size:12px;background:#172742;padding:12px;border-radius:9px}</style></head>
+<body><h2>🌌 后置摄像头诊断 · 独立实验 D1</h2><p>仅验证镜头能否打开与实际启用的设备，不加载 MediaPipe，不修改 R12/R13。</p>
+<video id="preview" autoplay muted playsinline></video>
+<button id="rear">测试后置（严格）</button><button id="front">测试前置</button><button id="list">列出摄像头</button><button id="stop">关闭摄像头</button><pre id="log"></pre>
+<script>
+const v=document.querySelector('#preview'),log=document.querySelector('#log');let stream;
+function write(msg){log.textContent=new Date().toLocaleTimeString()+' '+msg+'\n'+log.textContent}
+function stop(){if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}v.pause();v.srcObject=null}
+async function openCamera(facing){
+stop();await new Promise(r=>setTimeout(r,250));
+write('申请 '+facing+' 摄像头 (exact)...');
+let acquired;
+try{
+acquired=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{exact:facing},width:{ideal:640},height:{ideal:480}}});
+stream=acquired;v.srcObject=acquired;await v.play();
+const track=stream.getVideoTracks()[0];write('成功: '+JSON.stringify({label:track.label,settings:track.getSettings(),videoWidth:v.videoWidth,videoHeight:v.videoHeight},null,2));
+}catch(e){acquired?.getTracks().forEach(t=>t.stop());stream=null;v.srcObject=null;write('失败: '+e.name+' - '+e.message)}
+}
+document.querySelector('#rear').onclick=()=>openCamera('environment');
+document.querySelector('#front').onclick=()=>openCamera('user');
+document.querySelector('#stop').onclick=()=>{stop();write('已关闭')};
+document.querySelector('#list').onclick=async()=>{try{const d=await navigator.mediaDevices.enumerateDevices();write(JSON.stringify(d.filter(x=>x.kind==='videoinput').map(x=>({label:x.label,idTail:x.deviceId.slice(-6)})),null,2))}catch(e){write('列举失败: '+e.name+' '+e.message)}};
+write('安全上下文: '+isSecureContext+'；mediaDevices: '+Boolean(navigator.mediaDevices));
+window.addEventListener('pagehide',stop);
+</script></body></html>
