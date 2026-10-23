@@ -1,0 +1,179 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Dreamscape · 手指捏合测试</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#081322;color:#f5f8ff;font-family:system-ui,-apple-system,sans-serif}
+#scene{position:fixed;inset:0;overflow:hidden;background:#101b29}video,canvas{position:absolute;width:100%;height:100%;object-fit:cover}video{transform:none}canvas{pointer-events:none}
+#top{position:fixed;top:env(safe-area-inset-top);left:10px;right:10px;padding:12px 14px;background:#071728dc;border:1px solid #536887;border-radius:16px;z-index:2;font-size:14px;line-height:1.5}
+h1{margin:0 0 4px;font-size:17px}#state{color:#7ee8da;font-weight:700}#info{color:#dae5ff}#bottom{position:fixed;bottom:calc(12px + env(safe-area-inset-bottom));left:10px;right:10px;z-index:2;display:flex;gap:8px;flex-wrap:wrap}
+button{border:0;border-radius:13px;padding:13px 14px;background:#87bbff;color:#0c1a30;font-weight:700;font-size:16px;flex:1;min-width:100px}button.secondary{background:#263c59;color:white}
+#tune{position:fixed;bottom:155px;left:10px;right:10px;z-index:3;background:#071728e8;border:1px solid #536887;border-radius:12px;padding:8px 12px;font-size:13px}#releaseSlider{width:100%;accent-color:#7ee8da}#note{position:fixed;bottom:105px;left:10px;right:10px;z-index:2;font-size:12px;color:#e3ecfa;background:#081527ba;padding:7px 10px;border-radius:9px}
+</style></head>
+<body><div id="scene"><video id="video" autoplay muted playsinline></video><canvas id="overlay"></canvas></div>
+<div id="top"><h1>🌌 Dreamscape · 捏合识别实验 R16.1</h1><div id="state">尚未启动</div><div id="info">点击「启动摄像头」，对准一只手。捏合拇指和食指会出现红色轨迹。</div></div>
+<div id="note">R16.1 测试版：可直接调整松开灵敏度（保存到本机），自适应防抖滤波及曲线绘制。当前仅验证视觉手势＋屏幕二维轨迹；不代表 ARCore 三维定位或 VR 已完成。请先不要购买硬件。</div>
+<div id="tune"><label for="releaseSlider">松开灵敏度：<strong id="releaseValue">默认</strong>（越往左，越容易停笔）</label><input type="range" id="releaseSlider" min="0.30" max="0.80" step="0.01" value="0.45"><div id="ratioReadout">当前捏合比值：--</div></div><div id="bottom"><button id="start">启动摄像头</button><button class="secondary" id="clear">清除轨迹</button><button class="secondary" id="flip">切换镜头</button></div>
+<script type="module">
+const video=document.querySelector('#video'),canvas=document.querySelector('#overlay'),ctx=canvas.getContext('2d');
+const state=document.querySelector('#state'),info=document.querySelector('#info'),start=document.querySelector('#start');
+let model,stream,active=false,busy=false,face='user',lastT=-1,lastFrame=-1,down=false,points=[],strokes=[],lastDraw=0,miss=0,mirror=true,switching=false;
+let releaseFrames=0,smoothedTip=null,lastFilterTime=null,tipVelocity={x:0,y:0};
+let releaseThreshold=Number(localStorage.getItem('dreamscapeReleaseThreshold')||'0.45');
+const PINCH_ON=.40,RELEASE_CONFIRM_FRAMES=2;
+const slider=document.querySelector('#releaseSlider'),releaseValue=document.querySelector('#releaseValue'),ratioReadout=document.querySelector('#ratioReadout');
+releaseThreshold=Math.max(.41,Math.min(.80,releaseThreshold));slider.value=releaseThreshold;releaseValue.textContent=releaseThreshold.toFixed(2);
+slider.addEventListener('input',()=>{releaseThreshold=Math.max(.41,Number(slider.value));releaseValue.textContent=releaseThreshold.toFixed(2);localStorage.setItem('dreamscapeReleaseThreshold',String(releaseThreshold))});
+const MIN_CUTOFF=0.85,BETA=0.008,DERIVATIVE_CUTOFF=1.0,STATIC_DEADZONE=1.8;
+function resetFilter(){smoothedTip=null;lastFilterTime=null;tipVelocity={x:0,y:0}}
+function resetGesture(){down=false;points=[];releaseFrames=0;resetFilter()}
+function lowpass(prev,current,alpha){return prev+alpha*(current-prev)}
+function alphaFor(cutoff,dt){const tau=1/(2*Math.PI*cutoff);return 1/(1+tau/dt)}
+// One Euro filter: stable at rest, quicker for intentional movement. Time uses
+// performance.now() and is independent from the MediaPipe video frame timestamp.
+function smoothTip(tip,now){
+ if(!smoothedTip){smoothedTip={...tip};lastFilterTime=now;return {...smoothedTip}}
+ const dt=Math.max(1/120,Math.min(.1,(now-lastFilterTime)/1000));lastFilterTime=now;
+ const rawV={x:(tip.x-smoothedTip.x)/dt,y:(tip.y-smoothedTip.y)/dt};
+ const da=alphaFor(DERIVATIVE_CUTOFF,dt);
+ tipVelocity.x=lowpass(tipVelocity.x,rawV.x,da);
+ tipVelocity.y=lowpass(tipVelocity.y,rawV.y,da);
+ const speed=Math.hypot(tipVelocity.x,tipVelocity.y);
+ const smoothing=alphaFor(MIN_CUTOFF+BETA*speed,dt);
+ const next={x:lowpass(smoothedTip.x,tip.x,smoothing),y:lowpass(smoothedTip.y,tip.y,smoothing)};
+ if(Math.hypot(next.x-smoothedTip.x,next.y-smoothedTip.y)>STATIC_DEADZONE || speed>75)smoothedTip=next;
+ return {...smoothedTip}
+}
+
+function status(s){state.textContent=s}
+function resize(){const r=canvas.getBoundingClientRect(),d=Math.min(devicePixelRatio||1,2);canvas.width=Math.round(r.width*d);canvas.height=Math.round(r.height*d);ctx.setTransform(d,0,0,d,0,0)}
+window.addEventListener('resize',resize);resize();
+function xy(p){const w=canvas.clientWidth,h=canvas.clientHeight,vw=video.videoWidth||w,vh=video.videoHeight||h;const scale=Math.max(w/vw,h/vh),sw=vw*scale,sh=vh*scale;
+return {x:(w-sw)/2+(mirror?1-p.x:p.x)*sw,y:(h-sh)/2+p.y*sh}}
+function syncMirror(){video.style.transform=mirror?'scaleX(-1)':'none'}
+syncMirror();
+function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y)}
+function paint(lm){const w=canvas.clientWidth,h=canvas.clientHeight;ctx.clearRect(0,0,w,h);
+for(const stroke of strokes){ctx.strokeStyle='#ff627e';ctx.lineWidth=6;ctx.lineJoin='round';ctx.lineCap='round';ctx.beginPath();if(stroke.length){ctx.moveTo(stroke[0].x,stroke[0].y);for(let i=1;i<stroke.length-1;i++){const a=stroke[i],b=stroke[i+1];ctx.quadraticCurveTo(a.x,a.y,(a.x+b.x)/2,(a.y+b.y)/2)}if(stroke.length>1){const end=stroke[stroke.length-1];ctx.lineTo(end.x,end.y)}else{ctx.lineTo(stroke[0].x+.01,stroke[0].y)}}ctx.stroke()}
+if(!lm)return;
+const connections=[[0,1],[1,2],[2,3],[3,4],[0,5],[5,6],[6,7],[7,8],[5,9],[9,10],[10,11],[11,12],[9,13],[13,14],[14,15],[15,16],[13,17],[17,18],[18,19],[19,20],[0,17]];
+ctx.lineWidth=2;ctx.strokeStyle='#63deff';for(const [a,b] of connections){let p=xy(lm[a]),q=xy(lm[b]);ctx.beginPath();ctx.moveTo(p.x,p.y);ctx.lineTo(q.x,q.y);ctx.stroke()}
+ctx.fillStyle=down?'#ff5877':'#7cf4ae';const tip=smoothedTip||xy(lm[8]);ctx.beginPath();ctx.arc(tip.x,tip.y,12,0,Math.PI*2);ctx.fill()
+}
+let initializing=false;
+const timeout=(promise,ms,label)=>Promise.race([promise,new Promise((_,reject)=>setTimeout(()=>reject(new Error(label+'超时（'+Math.round(ms/1000)+'秒）')),ms))]);
+async function init(){
+ if(active){status('识别已经启动');return}
+ if(initializing){status('正在启动中，请看这里的进度提示');return}
+ initializing=true;start.textContent='启动中…';
+ try{
+  status('R16.1 · 第一步：申请摄像头权限');
+  await camera();
+  status('R16.1 · 摄像头已开启，准备模型');
+  const base=new URL('./vendor/mediapipe/',document.baseURI);
+  const mod=await timeout(import(base.href+'vision_bundle.mjs'),15000,'识别程序加载');
+  status('R16.1 · 加载识别引擎');
+  const vision=await timeout(mod.FilesetResolver.forVisionTasks(base.href),15000,'WASM 加载');
+  status('R16.1 · 初始化手部模型');
+  model=await timeout(mod.HandLandmarker.createFromOptions(vision,{baseOptions:{modelAssetPath:base.href+'hand_landmarker.task',delegate:'CPU'},runningMode:'VIDEO',numHands:1,minHandDetectionConfidence:.55,minTrackingConfidence:.5}),30000,'模型初始化');
+  active=true;status('R16.1 · 已启动！请伸出手');requestAnimationFrame(loop);
+  start.textContent='已启动';
+ }catch(e){
+  status('R16.1 启动失败：'+e.message);
+  info.textContent='故障阶段：'+(e.stack||String(e)).slice(0,500);
+  start.textContent='重新尝试';
+ }finally{initializing=false}
+}
+// Each camera attempt has its own timeout and cleanup. A late getUserMedia result
+// is stopped rather than allowed to resurrect an already-failed camera session.
+async function openCamera(constraints,label){
+ let expired=false,timer;
+ const request=navigator.mediaDevices.getUserMedia({audio:false,video:constraints});
+ request.then(media=>{if(expired)media.getTracks().forEach(t=>t.stop())}).catch(()=>{});
+ try{return await Promise.race([request,new Promise((_,reject)=>{timer=setTimeout(()=>{expired=true;reject(new Error(label+'权限/设备响应超时'))},10000)})])}
+ finally{clearTimeout(timer)}
+}
+async function camera(target=face){
+ if(!navigator.mediaDevices?.getUserMedia)throw new Error('浏览器未提供摄像头接口');
+ if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
+ video.pause();video.srcObject=null;
+ // R16.1: if getUserMedia succeeds but HTMLVideoElement.play() stalls,
+ // do NOT cycle through four camera acquisitions. Retain this stream for diagnostics.
+ const modes=[{facingMode:{ideal:target},width:{ideal:640},height:{ideal:480},frameRate:{ideal:30}},
+              {facingMode:target},true];
+ let fresh=null,acquisitionError=null;
+ for(let i=0;i<modes.length;i++){
+   try{
+     status('R16.1 · 申请摄像头 '+(i+1)+'/3');
+     fresh=await openCamera(modes[i],'申请镜头 '+(i+1));
+     break;
+   }catch(e){acquisitionError=e;info.textContent='申请摄像头失败：'+e.name+' '+e.message;
+     if(e.name==='NotAllowedError'||e.name==='SecurityError')break;}
+ }
+ if(!fresh)throw new Error('未能获得视频流：'+(acquisitionError?.name||'Error')+' '+(acquisitionError?.message||'未知'));
+ stream=fresh;
+ const track=stream.getVideoTracks()[0];
+ track.addEventListener('ended',()=>{status('摄像头视频轨道已结束，请重新尝试')},{once:true});
+ video.srcObject=stream;video.muted=true;video.setAttribute('playsinline','');
+ const details=()=>('track='+track.readyState+' / muted='+track.muted+' / '+(track.getSettings().width||'?')+'×'+(track.getSettings().height||'?')+' / video='+video.readyState+' / 尺寸='+video.videoWidth+'×'+video.videoHeight);
+ status('R16.1 · 已获取视频流，等待画面');
+ // A video.play() promise can hang in some mobile browsers even with live tracks.
+ // Initiate playback, separately observe decoded frames, preserve informative errors.
+ let playError=null;
+ try{video.play().catch(e=>{playError=e})}catch(e){playError=e}
+ const started=performance.now();
+ while(performance.now()-started<8500){
+   if(video.videoWidth>0&&video.videoHeight>0&&video.readyState>=2){
+     lastFrame=-1;miss=0;info.textContent='摄像头已就绪 '+details();return;
+   }
+   if(track.readyState==='ended')break;
+   await new Promise(resolve=>setTimeout(resolve,200));
+ }
+ // Keep exact stage visible, but release stream before offering a retry.
+ const diagnostic=details()+(playError?' / play='+playError.name+' '+playError.message:' / play()未明确报错');
+ info.textContent='视频流已取得但未产生可用画面：'+diagnostic;
+ stream.getTracks().forEach(t=>t.stop());stream=null;video.pause();video.srcObject=null;
+ throw new Error('取得摄像头后画面未就绪；'+diagnostic);
+}
+
+async function loop(){
+if(!active)return;requestAnimationFrame(loop);
+if(switching || busy || video.readyState<2 || video.currentTime===lastFrame)return;
+busy=true;lastFrame=video.currentTime;
+try{
+const now=performance.now(),res=model.detectForVideo(video,now),lm=res.landmarks?.[0];
+if(!lm){miss++;if(miss>3){resetGesture();status('未找到手：请伸入镜头范围')}paint(null);return}
+miss=0;
+const palm=Math.max(dist(lm[5],lm[17]),.025),ratio=dist(lm[4],lm[8])/palm;
+const prev=down;
+if(!down){if(ratio<PINCH_ON){down=true;releaseFrames=0}}
+else if(ratio>releaseThreshold){if(++releaseFrames>=RELEASE_CONFIRM_FRAMES)resetGesture()}
+else releaseFrames=0;
+if(down&&!prev){points=[];resetFilter();strokes.push(points)}
+const tip=xy(lm[8]);
+const filtered=smoothTip(tip,now);
+if(down && (!points.length||dist(points[points.length-1],filtered)>2))points.push({...filtered})
+
+status(down?'🔴 捏合中 · 正在绘画':'🟢 已识别手 · 张开停止');
+ratioReadout.textContent='当前捏合比值：'+ratio.toFixed(2)+' ｜ '+(down?'绘画中':'已停笔');
+info.textContent='开始 '+PINCH_ON.toFixed(2)+'｜ 停止 '+releaseThreshold.toFixed(2)+'｜ 笔画 '+strokes.length+' ｜ 按实际手势调节滑块';
+paint(lm);
+}catch(e){status('识别异常：'+e.message);active=false;start.disabled=false}
+finally{busy=false}
+}
+start.addEventListener('click',init);
+document.querySelector('#clear').addEventListener('click',()=>{strokes=[];resetGesture();paint(null)});
+document.querySelector('#flip').addEventListener('click',async()=>{
+ if(!active||switching)return;
+ const button=document.querySelector('#flip'),prevFace=face,prevMirror=mirror,target=face==='user'?'environment':'user';
+ switching=true;button.disabled=true;button.textContent='切换中…';resetGesture();status('正在切换摄像头…');
+ try{
+  await camera(target);face=target;mirror=face==='user';syncMirror();
+  strokes=[];paint(null);status('✅ 已切换到'+(face==='user'?'前置':'后置')+'摄像头');
+ }catch(e){
+  status('切换失败：'+e.message+'；正在尝试恢复原镜头');
+  try{await camera(prevFace);face=prevFace;mirror=prevMirror;syncMirror();status('已恢复原镜头；切换失败：'+e.message)}
+  catch(e2){active=false;start.textContent='重新尝试';status('镜头无法恢复：'+e2.message)}
+ }finally{switching=false;button.disabled=false;button.textContent='切换镜头'}
+});
+
+window.addEventListener('pagehide',()=>stream?.getTracks().forEach(t=>t.stop()));
+</script></body></html>
