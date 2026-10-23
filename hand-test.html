@@ -2,25 +2,27 @@
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>Dreamscape · 手指捏合测试</title>
 <style>
 *{box-sizing:border-box}body{margin:0;background:#081322;color:#f5f8ff;font-family:system-ui,-apple-system,sans-serif}
-#scene{position:fixed;inset:0;overflow:hidden;background:#101b29}video,canvas{position:absolute;width:100%;height:100%;object-fit:cover}video{transform:scaleX(-1)}canvas{pointer-events:none}
+#scene{position:fixed;inset:0;overflow:hidden;background:#101b29}video,canvas{position:absolute;width:100%;height:100%;object-fit:cover}video{transform:none}canvas{pointer-events:none}
 #top{position:fixed;top:env(safe-area-inset-top);left:10px;right:10px;padding:12px 14px;background:#071728dc;border:1px solid #536887;border-radius:16px;z-index:2;font-size:14px;line-height:1.5}
 h1{margin:0 0 4px;font-size:17px}#state{color:#7ee8da;font-weight:700}#info{color:#dae5ff}#bottom{position:fixed;bottom:calc(12px + env(safe-area-inset-bottom));left:10px;right:10px;z-index:2;display:flex;gap:8px;flex-wrap:wrap}
 button{border:0;border-radius:13px;padding:13px 14px;background:#87bbff;color:#0c1a30;font-weight:700;font-size:16px;flex:1;min-width:100px}button.secondary{background:#263c59;color:white}
 #note{position:fixed;bottom:105px;left:10px;right:10px;z-index:2;font-size:12px;color:#e3ecfa;background:#081527ba;padding:7px 10px;border-radius:9px}
 </style></head>
 <body><div id="scene"><video id="video" autoplay muted playsinline></video><canvas id="overlay"></canvas></div>
-<div id="top"><h1>🌌 Dreamscape · 捏合识别实验 R10</h1><div id="state">尚未启动</div><div id="info">点击「启动摄像头」，对准一只手。捏合拇指和食指会出现红色轨迹。</div></div>
+<div id="top"><h1>🌌 Dreamscape · 捏合识别实验 R11</h1><div id="state">尚未启动</div><div id="info">点击「启动摄像头」，对准一只手。捏合拇指和食指会出现红色轨迹。</div></div>
 <div id="note">当前仅验证视觉手势＋屏幕二维轨迹；不代表 ARCore 三维定位或 VR 已完成。请先不要购买硬件。</div>
-<div id="bottom"><button id="start">启动摄像头</button><button class="secondary" id="clear">清除轨迹</button><button class="secondary" id="flip">切换镜头</button></div>
+<div id="bottom"><button id="start">启动摄像头</button><button class="secondary" id="clear">清除轨迹</button><button class="secondary" id="flip">切换镜头</button><button class="secondary" id="mirror">镜像：开</button></div>
 <script type="module">
 const video=document.querySelector('#video'),canvas=document.querySelector('#overlay'),ctx=canvas.getContext('2d');
 const state=document.querySelector('#state'),info=document.querySelector('#info'),start=document.querySelector('#start');
-let model,stream,active=false,busy=false,face='user',lastT=-1,lastFrame=-1,down=false,points=[],strokes=[],lastDraw=0,miss=0;
+let model,stream,active=false,busy=false,face='user',lastT=-1,lastFrame=-1,down=false,points=[],strokes=[],lastDraw=0,miss=0,mirror=true;
 function status(s){state.textContent=s}
 function resize(){const r=canvas.getBoundingClientRect(),d=Math.min(devicePixelRatio||1,2);canvas.width=Math.round(r.width*d);canvas.height=Math.round(r.height*d);ctx.setTransform(d,0,0,d,0,0)}
 window.addEventListener('resize',resize);resize();
 function xy(p){const w=canvas.clientWidth,h=canvas.clientHeight,vw=video.videoWidth||w,vh=video.videoHeight||h;const scale=Math.max(w/vw,h/vh),sw=vw*scale,sh=vh*scale;
-return {x:(w-sw)/2+(1-p.x)*sw,y:(h-sh)/2+p.y*sh}}
+return {x:(w-sw)/2+(mirror?1-p.x:p.x)*sw,y:(h-sh)/2+p.y*sh}}
+function syncMirror(){video.style.transform=mirror?'scaleX(-1)':'none';document.querySelector('#mirror').textContent='镜像：'+(mirror?'开':'关')}
+syncMirror();
 function dist(a,b){return Math.hypot(a.x-b.x,a.y-b.y)}
 function paint(lm){const w=canvas.clientWidth,h=canvas.clientHeight;ctx.clearRect(0,0,w,h);
 for(const stroke of strokes){ctx.strokeStyle='#ff627e';ctx.lineWidth=6;ctx.lineJoin='round';ctx.lineCap='round';ctx.beginPath();stroke.forEach((p,i)=>i?ctx.lineTo(p.x,p.y):ctx.moveTo(p.x,p.y));ctx.stroke()}
@@ -36,19 +38,19 @@ async function init(){
  if(initializing){status('正在启动中，请看这里的进度提示');return}
  initializing=true;start.textContent='启动中…';
  try{
-  status('R10 · 第一步：申请摄像头权限');
+  status('R11 · 第一步：申请摄像头权限');
   await timeout(camera(),12000,'摄像头启动');
-  status('R10 · 摄像头已开启，准备模型');
+  status('R11 · 摄像头已开启，准备模型');
   const base=new URL('./vendor/mediapipe/',document.baseURI);
   const mod=await timeout(import(base.href+'vision_bundle.mjs'),15000,'识别程序加载');
-  status('R10 · 加载识别引擎');
+  status('R11 · 加载识别引擎');
   const vision=await timeout(mod.FilesetResolver.forVisionTasks(base.href),15000,'WASM 加载');
-  status('R10 · 初始化手部模型');
+  status('R11 · 初始化手部模型');
   model=await timeout(mod.HandLandmarker.createFromOptions(vision,{baseOptions:{modelAssetPath:base.href+'hand_landmarker.task',delegate:'CPU'},runningMode:'VIDEO',numHands:1,minHandDetectionConfidence:.55,minTrackingConfidence:.5}),30000,'模型初始化');
-  active=true;status('R10 · 已启动！请伸出手');requestAnimationFrame(loop);
+  active=true;status('R11 · 已启动！请伸出手');requestAnimationFrame(loop);
   start.textContent='已启动';
  }catch(e){
-  status('R10 启动失败：'+e.message);
+  status('R11 启动失败：'+e.message);
   info.textContent='故障阶段：'+(e.stack||String(e)).slice(0,500);
   start.textContent='重新尝试';
  }finally{initializing=false}
@@ -79,6 +81,7 @@ finally{busy=false}
 }
 start.addEventListener('click',init);
 document.querySelector('#clear').addEventListener('click',()=>{strokes=[];points=[];paint(null)});
-document.querySelector('#flip').addEventListener('click',async()=>{if(!active)return;face=face==='user'?'environment':'user';down=false;points=[];try{await camera();status('镜头已切换')}catch(e){status('切换失败：'+e.message)}});
+document.querySelector('#flip').addEventListener('click',async()=>{if(!active)return;face=face==='user'?'environment':'user';mirror=face==='user';syncMirror();down=false;points=[];try{await camera();status('镜头已切换')}catch(e){status('切换失败：'+e.message)}});
+document.querySelector('#mirror').addEventListener('click',()=>{mirror=!mirror;syncMirror();strokes=[];points=[];down=false;paint(null);status('镜像已切换，已清除旧轨迹以避免反向叠加')});
 window.addEventListener('pagehide',()=>stream?.getTracks().forEach(t=>t.stop()));
 </script></body></html>
