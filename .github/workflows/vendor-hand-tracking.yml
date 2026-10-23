@@ -4,6 +4,9 @@ on:
   push:
     paths:
       - '.github/workflows/vendor-hand-tracking.yml'
+concurrency:
+  group: vendor-hand-tracking-main
+  cancel-in-progress: false
 jobs:
   vendor:
     runs-on: ubuntu-latest
@@ -11,6 +14,8 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: main
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -36,5 +41,17 @@ jobs:
           git add vendor/mediapipe
           if ! git diff --cached --quiet; then
             git commit -m 'Vendor MediaPipe runtime and model for offline CDN-free hand test'
-            git push
+            # Main may advance while dependencies are downloading. Rebase rather than force push.
+            for attempt in 1 2 3 4 5; do
+              git fetch origin main
+              git rebase origin/main
+              if git push origin HEAD:main; then
+                echo 'Vendor assets pushed successfully'
+                exit 0
+              fi
+              echo "Main advanced during push; retry $attempt/5"
+              sleep 3
+            done
+            echo 'Failed after safe rebase retries' >&2
+            exit 1
           fi
