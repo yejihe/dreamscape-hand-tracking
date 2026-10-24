@@ -6,6 +6,10 @@ on:
     paths:
       - 'experiments/dreamscape-hand-phase2/android-app/**'
       - '.github/workflows/phase21-android-build.yml'
+  pull_request:
+    paths:
+      - 'experiments/dreamscape-hand-phase2/android-app/**'
+      - '.github/workflows/phase21-android-build.yml'
   workflow_dispatch:
 permissions:
   contents: read
