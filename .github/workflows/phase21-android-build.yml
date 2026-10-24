@@ -1,0 +1,43 @@
+name: Dreamscape Hand Phase 2.1 Android Build
+on:
+  push:
+    branches:
+      - experiment/phase2-1-arcore-mediapipe-sync
+    paths:
+      - 'experiments/dreamscape-hand-phase2/android-app/**'
+      - '.github/workflows/phase21-android-build.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  phase21-debug-apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Install Android 35 SDK
+        run: |
+          sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+      - name: Setup Gradle 8.9
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Confirm checked-in model exists
+        run: test -s vendor/mediapipe/hand_landmarker.task
+      - name: Build isolated Phase 2.1 debug APK
+        working-directory: experiments/dreamscape-hand-phase2/android-app
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+      - name: Upload Phase 2.1 debug APK (only if built)
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dreamscape-hand-phase21-debug-apk
+          path: experiments/dreamscape-hand-phase2/android-app/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
