@@ -62,6 +62,10 @@ class MainActivity : Activity() {
 
     override fun onResume() {
         super.onResume()
+        startArIfPermitted()
+    }
+
+    private fun startArIfPermitted() {
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.CAMERA), 71)
             return
@@ -101,7 +105,7 @@ class MainActivity : Activity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 71) {
-            if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) onResume()
+            if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) startArIfPermitted()
             else report("需要相机权限才能启动；请在系统设置授权")
         }
     }
