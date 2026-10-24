@@ -24,11 +24,21 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-      - name: Install Android 35 SDK
+      # GitHub-hosted ubuntu runners already provide ANDROID_HOME and cmdline-tools.
+      # The old setup-android action attempted sdkmanager "tools" (removed package)
+      # and failed before Gradle was ever run; avoid that obsolete bootstrap.
+      - name: Verify Android SDK and install API 35
         run: |
-          sdkmanager --install "platforms;android-35" "build-tools;35.0.0"
+          set -euo pipefail
+          echo "ANDROID_HOME=${ANDROID_HOME:-unset}"
+          test -d "${ANDROID_HOME:?Android SDK unavailable on this runner}"
+          if command -v sdkmanager >/dev/null 2>&1; then
+            SDKMANAGER="$(command -v sdkmanager)"
+          else
+            SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -type f -name sdkmanager | head -n 1)"
+          fi
+          test -n "$SDKMANAGER"
+          "$SDKMANAGER" --install "platforms;android-35" "build-tools;35.0.0"
       - name: Setup Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
         with:
