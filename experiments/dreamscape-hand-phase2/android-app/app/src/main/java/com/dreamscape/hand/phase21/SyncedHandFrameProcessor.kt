@@ -23,6 +23,7 @@ import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarkerResult
 class SyncedHandFrameProcessor(private val landmarker: HandLandmarker) {
     data class Sample(
         val frameTimestampNs: Long,
+        val androidCameraTimestampNs: Long,
         val imageTimestampNs: Long,
         val detectorTimestampMs: Long,
         val imageWidth: Int,
@@ -55,12 +56,24 @@ class SyncedHandFrameProcessor(private val landmarker: HandLandmarker) {
 
         // acquireCameraImage() may legitimately fail with NotYetAvailableException.
         // The outer caller should catch/log recoverable ARCore exceptions.
+        // ARCore Frame.timestamp and the Android Camera timestamp are not
+        // guaranteed to be from the same clock domain. The returned Android
+        // Image's timestamp belongs to Android Camera. Compare the latter
+        // with Frame.getAndroidCameraTimestamp(), NOT Frame.getTimestamp().
+        val androidCameraNs = frame.androidCameraTimestamp
         val image = frame.acquireCameraImage()
         image.use {
             if (it.format != android.graphics.ImageFormat.YUV_420_888)
                 return Outcome.Skipped("unexpected image format")
-            if (it.timestamp != frameNs)
-                return Outcome.Skipped("image/frame timestamp mismatch")
+            if (androidCameraNs <= 0L || it.timestamp <= 0L)
+                return Outcome.Skipped(
+                    "timestamp unavailable; frame=$frameNs camera=$androidCameraNs image=${it.timestamp}")
+            if (it.timestamp != androidCameraNs)
+                return Outcome.Skipped(
+                    "camera/image timestamp mismatch; frame=$frameNs camera=$androidCameraNs image=${it.timestamp} Δ=${it.timestamp - androidCameraNs}ns")
+            // Use the ARCore Frame timestamp as monotonically increasing
+            // inference clock. The ORIGINAL image and pose both come from
+            // this specific ARCore Frame. Never pair against "latest" pose.
             val timestampMs = frameNs / 1_000_000L
             if (timestampMs <= previousDetectorMs)
                 return Outcome.Skipped("non-increasing MediaPipe milliseconds")
@@ -84,7 +97,7 @@ class SyncedHandFrameProcessor(private val landmarker: HandLandmarker) {
             previousDetectorMs = timestampMs
 
             return Outcome.Captured(
-                Sample(frameNs, it.timestamp, timestampMs, it.width, it.height,
+                Sample(frameNs, androidCameraNs, it.timestamp, timestampMs, it.width, it.height,
                     focal[0], focal[1], center[0], center[1],
                     pose.translation.copyOf(), pose.rotationQuaternion.copyOf(),
                     result, duration)
