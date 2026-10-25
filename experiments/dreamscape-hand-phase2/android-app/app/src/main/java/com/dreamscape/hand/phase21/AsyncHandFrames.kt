@@ -137,9 +137,22 @@ internal class AsyncHandFrames(private val detector: HandLandmarker) {
             }
         }
         val tip = hand?.getOrNull(8)?.let { floatArrayOf(it.x(), it.y()) }
-        val depthText = if (p.depth == null) "当前帧未取得深度图 / 设备可能不支持"
-            else if (tip == null) "有场景深度，未检测到手指"
-            else sampleDepth(p.depth, tip[0], tip[1])
+        // Optional, rough geometry sanity check only. 75mm is a PLACEHOLDER
+        // index-MCP-to-pinky-MCP palm width, not this user's measured hand.
+        // Projected width shrinks with palm yaw, creating a depth OVERestimate.
+        val roughPalmDistanceMm = hand?.takeIf { it.size >= 18 }?.let { dots ->
+            val first = dots[5]; val last = dots[17]
+            val dx = (first.x() - last.x()) * p.width / p.focal[0]
+            val dy = (first.y() - last.y()) * p.height / p.focal[1]
+            val angularSpan = kotlin.math.hypot(dx, dy)
+            if (!angularSpan.isFinite() || angularSpan < .015f) null
+            else (75f / angularSpan).toInt()
+        }
+        val comparison = roughPalmDistanceMm?.let {
+            "手掌宽度粗估：${it}mm（假设75mm，未标定）" } ?: "手掌宽度粗估：当前姿态不可用"
+        val depthText = if (p.depth == null) "当前帧未取得场景深度｜${comparison}"
+            else if (tip == null) "有场景深度，未检测到食指｜${comparison}"
+            else sampleDepth(p.depth, tip[0], tip[1], roughPalmDistanceMm) + "\n" + comparison
         return Result(p, result.landmarks().size, views, tip, depthText,
             SystemClock.elapsedRealtime() - start,
             SystemClock.elapsedRealtime() - p.capturedAtMs)
@@ -151,28 +164,43 @@ internal class AsyncHandFrames(private val detector: HandLandmarker) {
             basis[1] + x * (basis[3] - basis[1]) + y * (basis[5] - basis[1])
         )
 
-    private fun sampleDepth(d: DepthMap, ix: Float, iy: Float): String {
+    private fun sampleDepth(d: DepthMap, ix: Float, iy: Float, palmMm: Int?): String {
         val tex = transform(d.normalizedImageToTexture, ix, iy)
-        if (tex[0] !in 0f..1f || tex[1] !in 0f..1f)
-            return "指尖映射超出深度图范围"
+        if (!tex[0].isFinite() || !tex[1].isFinite() ||
+            tex[0] !in 0f..1f || tex[1] !in 0f..1f)
+            return "深度映射越界，不得估算指尖距离"
         val px = (tex[0] * d.width).toInt().coerceIn(0, d.width - 1)
         val py = (tex[1] * d.height).toInt().coerceIn(0, d.height - 1)
-        val plane = d.plane
-        val arr = plane.data
-        fun value(x: Int, y: Int): Int? {
-            val start = y * plane.rowStride + x * plane.pixelStride
-            if (start < 0 || start + 1 >= arr.size) return null
-            val mm = (arr[start].toInt() and 0xFF) or
-                ((arr[start + 1].toInt() and 0xFF) shl 8)
-            return mm.takeIf { it in 1..20000 }
+        val arr = d.plane.data
+        val stride = d.plane.rowStride
+        val pixelStride = d.plane.pixelStride
+        fun depth(x: Int, y: Int): Int? {
+            val offset = y * stride + x * pixelStride
+            if (offset < 0 || offset + 1 >= arr.size) return null
+            val mm = (arr[offset].toInt() and 255) or
+                ((arr[offset + 1].toInt() and 255) shl 8)
+            return mm.takeIf { it > 0 }
         }
-        val values = ArrayList<Int>(9)
-        for (y in (py - 1).coerceAtLeast(0)..(py + 1).coerceAtMost(d.height - 1))
-            for (x in (px - 1).coerceAtLeast(0)..(px + 1).coerceAtMost(d.width - 1))
-                value(x, y)?.let(values::add)
-        values.sort()
-        return if (values.isEmpty()) "指尖附近场景深度无效"
-        else "候选场景深度：${values[values.size / 2]}mm（有效${values.size}/9；尚未验证是否为手指）"
+        val readings = ArrayList<Int>(9)
+        for (yy in (py - 1).coerceAtLeast(0)..(py + 1).coerceAtMost(d.height - 1)) {
+            for (xx in (px - 1).coerceAtLeast(0)..(px + 1).coerceAtMost(d.width - 1)) {
+                depth(xx, yy)?.let { readings.add(it) }
+            }
+        }
+        readings.sort()
+        if (readings.size < 5) return "深度图点(${px},${py})仅${readings.size}/9有效，不足以判断"
+        val median = readings[readings.size / 2]
+        // Short-range sanity gate only; NOT evidence of hand-surface depth.
+        // Reject absurd values like 18639mm observed on user's 0.5m hand.
+        val plausibleRange = median in 150..2000
+        val handGeometryDisagrees = palmMm != null && palmMm in 150..1800 &&
+            (median > palmMm * 2.2 || palmMm > median * 2.2)
+        val verdict = when {
+            !plausibleRange -> "❌超出近手实验范围（15–200cm）：不是可用的手指深度"
+            handGeometryDisagrees -> "⚠与手宽粗估相差超过2.2倍：疑似背景深度"
+            else -> "⚠仅是场景深度候选值，手指深度仍未验证"
+        }
+        return "场景深度${median}mm｜有效${readings.size}/9｜坐标(${px},${py})\n${verdict}"
     }
 
     private fun convert(p: Packet): Bitmap {

@@ -62,7 +62,7 @@ class MainActivity : Activity() {
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         }
         statusLabel = TextView(this).apply {
-            text = "🌌 Phase 2.2.2｜等待 ARCore 摄像头…\n绿色骨架、粉色指尖用于2D对齐测试；深度未验证"
+            text = "🌌 Phase 2.2.3｜等待 ARCore 摄像头…\n绿色骨架、粉色指尖用于2D对齐测试；深度未验证"
             textSize = 14f
             setTextColor(Color.WHITE)
             setBackgroundColor(0xD9092035.toInt())
@@ -261,12 +261,12 @@ class MainActivity : Activity() {
                                         "相机XYZ(米)：%.2f, %.2f, %.2f\n" +
                                         "相机-图像时间差：%.2fms\n" +
                                         "摄像头与识别分线程，避免画面被推理阻塞。\n" +
-                                        "⚠ 深度候选非可靠手指深度，未完成三维绘画",
+                                        "⚠ 远距场景深度会被判为无效，仍未完成三维定位",
                                         result.handCount, captured, skipped, tipText,
                                         result.depthText, result.inferenceMs, result.resultAgeMs,
                                         p.worldCamera[0], p.worldCamera[1],
                                         p.worldCamera[2], (p.imageNs - p.cameraNs) / 1_000_000.0)
-                                    report("🌌 Dreamscape Hand｜Phase 2.2.2 流畅度实验\n" + msg)
+                                    report("🌌 Dreamscape Hand｜Phase 2.2.3 流畅度实验\n" + msg)
                                 }
                             }
                         } catch (e: Exception) {
