@@ -12,6 +12,9 @@ import android.view.Gravity
 import android.view.WindowInsets
 import android.os.Build
 import com.google.ar.core.TrackingState
+import com.google.ar.core.Config
+import com.google.ar.core.Coordinates2d
+import android.util.Log
 import com.google.ar.core.TrackingFailureReason
 import android.view.ViewGroup
 import android.widget.FrameLayout
@@ -36,6 +39,8 @@ import javax.microedition.khronos.opengles.GL10
 class MainActivity : Activity() {
     private lateinit var glView: GLSurfaceView
     private lateinit var statusLabel: TextView
+    private lateinit var handOverlay: HandLandmarkOverlay
+    @Volatile private var depthSupported = false
     @Volatile private var arSession: Session? = null
     private var installRequested = false
     private var processor: SyncedHandFrameProcessor? = null
@@ -50,7 +55,7 @@ class MainActivity : Activity() {
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         }
         statusLabel = TextView(this).apply {
-            text = "🌌 Phase 2.1.3｜等待 ARCore 摄像头…\n仅诊断摄像头和同帧追踪，非三维绘画"
+            text = "🌌 Phase 2.2｜等待 ARCore 摄像头…\n绿色骨架、粉色指尖用于2D对齐测试；深度未验证"
             textSize = 14f
             setTextColor(Color.WHITE)
             setBackgroundColor(0xD9092035.toInt())
@@ -58,6 +63,8 @@ class MainActivity : Activity() {
         }
         val root = FrameLayout(this)
         root.addView(glView, FrameLayout.LayoutParams(-1, -1))
+        handOverlay = HandLandmarkOverlay(this)
+        root.addView(handOverlay, FrameLayout.LayoutParams(-1, -1))
         val params = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP)
         root.addView(statusLabel, params)
@@ -97,6 +104,13 @@ class MainActivity : Activity() {
                     else -> Unit
                 }
                 arSession = Session(this)
+                val session = requireNotNull(arSession)
+                depthSupported = session.isDepthModeSupported(Config.DepthMode.AUTOMATIC)
+                if (depthSupported) {
+                    val config = session.config
+                    config.depthMode = Config.DepthMode.AUTOMATIC
+                    session.configure(config)
+                }
             }
             if (landmarker == null) {
                 val options = HandLandmarker.HandLandmarkerOptions.builder()
@@ -196,6 +210,7 @@ class MainActivity : Activity() {
                 // whether the camera never produced images, or visual SLAM had
                 // insufficient light/features, or a competing app used the camera.
                 if (tracking != TrackingState.TRACKING) {
+                    runOnUiThread { handOverlay.setPoints(null) }
                     val now = SystemClock.elapsedRealtime()
                     if (frameNs > 0 && now - lastCpuProbeMs > 1600) {
                         lastCpuProbeMs = now
@@ -228,23 +243,41 @@ class MainActivity : Activity() {
                 when (outcome) {
                     is SyncedHandFrameProcessor.Outcome.Skipped -> {
                         skipped++
+                        runOnUiThread { handOverlay.setPoints(null) }
                         update("已追踪，但还未完成同帧检测：${outcome.reason}\n帧=${frameNs}｜OpenGL=${glErr}")
                     }
                     is SyncedHandFrameProcessor.Outcome.Captured -> {
                         captured++
                         val sample = outcome.sample
-                        val hands = sample.landmarks.landmarks().size
+                        val hand = sample.landmarks.landmarks().firstOrNull()
                         val p = sample.translation
-                        val tip = sample.landmarks.landmarks().firstOrNull()?.getOrNull(8)
-                        val tipText = if (tip == null) "没有识别到手"
-                          else String.format(Locale.US, "食指图像归一化坐标 (%.3f, %.3f)", tip.x(), tip.y())
+                        if (hand != null && hand.size >= 21) {
+                            val cpuPoints = FloatArray(42) { idx ->
+                                if (idx % 2 == 0) hand[idx / 2].x() else hand[idx / 2].y()
+                            }
+                            val viewPoints = FloatArray(42)
+                            // MediaPipe normalized points come from the raw CPU camera image.
+                            // ARCore handles portrait rotation and preview crop.
+                            frame.transformCoordinates2d(
+                                Coordinates2d.IMAGE_NORMALIZED, cpuPoints,
+                                Coordinates2d.VIEW, viewPoints)
+                            runOnUiThread { handOverlay.setPoints(viewPoints) }
+                        } else {
+                            runOnUiThread { handOverlay.setPoints(null) }
+                        }
+                        val tip = hand?.getOrNull(8)
+                        val depthText = if (!depthSupported) "Depth API: 不支持"
+                            else if (tip == null) "Depth API: 待手进入画面"
+                            else FingertipDepthProbe.sample(frame, tip.x(), tip.y()).summary
+                        Log.d("DreamscapePhase22",
+                            "processed=${captured}; hand=${hand?.size ?: 0}; imageCameraOffsetNs=${sample.cameraImageOffsetNs}; ${depthText}")
                         update(String.format(Locale.US,
-                            "ARCore关联图像已处理：%d 帧｜跳过 %d\n手部数 %d ｜ %s\n相机 XYZ (米): %.2f, %.2f, %.2f\n图像 %dx%d｜推理 %dms\nFrame时间戳：%d\nAndroid相机时间戳：%d\nCPU图像时间戳：%d\n相机-图像时间偏移：%.2fms（非严格硬件同步）\n⚠ 尚无手指深度，不能称为三维手指定位",
-                            captured, skipped, hands, tipText, p[0], p[1], p[2],
-                            sample.imageWidth, sample.imageHeight,
-                            sample.processingMs, sample.frameTimestampNs,
-                            sample.androidCameraTimestampNs, sample.imageTimestampNs,
+                            "📍手：%d｜图像已处理：%d｜跳过 %d\n相机 XYZ：%.2f, %.2f, %.2f m\n食指图像坐标：(%.3f, %.3f)\n%s\n推理耗时：%dms｜图像相机偏移：%.2fms\n粉点=食指8号点；绿色=骨架（2D对齐待实测）\n⚠场景深度≠已验证指尖深度，尚未实现三维绘画",
+                            sample.landmarks.landmarks().size, captured, skipped,
+                            p[0], p[1], p[2], tip?.x() ?: -1f, tip?.y() ?: -1f,
+                            depthText, sample.processingMs,
                             sample.cameraImageOffsetNs / 1_000_000.0))
+
                     }
                 }
             } catch (e: NotYetAvailableException) {
@@ -262,7 +295,7 @@ class MainActivity : Activity() {
             val now = SystemClock.elapsedRealtime()
             if (now - lastReportMs >= 500L) {
                 lastReportMs = now
-                report("🌌 Dreamscape Hand｜Phase 2.1.3 图像关联实验\n" + value)
+                report("🌌 Dreamscape Hand｜Phase 2.2 指尖深度探针\n" + value)
             }
         }
     }
