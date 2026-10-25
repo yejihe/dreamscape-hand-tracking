@@ -50,7 +50,7 @@ class MainActivity : Activity() {
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         }
         statusLabel = TextView(this).apply {
-            text = "🌌 Phase 2.1.1｜等待 ARCore 摄像头…\n仅诊断摄像头和同帧追踪，非三维绘画"
+            text = "🌌 Phase 2.1.2｜等待 ARCore 摄像头…\n仅诊断摄像头和同帧追踪，非三维绘画"
             textSize = 14f
             setTextColor(Color.WHITE)
             setBackgroundColor(0xD9092035.toInt())
@@ -228,7 +228,7 @@ class MainActivity : Activity() {
                 when (outcome) {
                     is SyncedHandFrameProcessor.Outcome.Skipped -> {
                         skipped++
-                        update("已追踪，图像检测跳过：${outcome.reason}\n帧=${frameNs}｜OpenGL=${glErr}")
+                        update("已追踪，但还未完成同帧检测：${outcome.reason}\n帧=${frameNs}｜OpenGL=${glErr}")
                     }
                     is SyncedHandFrameProcessor.Outcome.Captured -> {
                         captured++
@@ -239,10 +239,11 @@ class MainActivity : Activity() {
                         val tipText = if (tip == null) "没有识别到手"
                           else String.format(Locale.US, "食指图像归一化坐标 (%.3f, %.3f)", tip.x(), tip.y())
                         update(String.format(Locale.US,
-                            "同帧校验通过：%d 帧｜跳过 %d\n手部数 %d ｜ %s\n相机 XYZ (米): %.2f, %.2f, %.2f\n图像 %dx%d｜推理 %dms\n时间戳 ns: %d\n⚠ 尚无手指深度，不能称为三维手指定位",
+                            "同帧校验通过：%d 帧｜跳过 %d\n手部数 %d ｜ %s\n相机 XYZ (米): %.2f, %.2f, %.2f\n图像 %dx%d｜推理 %dms\nFrame时间戳：%d\nAndroid相机时间戳：%d\nCPU图像时间戳：%d\n⚠ 尚无手指深度，不能称为三维手指定位",
                             captured, skipped, hands, tipText, p[0], p[1], p[2],
                             sample.imageWidth, sample.imageHeight,
-                            sample.processingMs, sample.frameTimestampNs))
+                            sample.processingMs, sample.frameTimestampNs,
+                            sample.androidCameraTimestampNs, sample.imageTimestampNs))
                     }
                 }
             } catch (e: NotYetAvailableException) {
@@ -260,7 +261,7 @@ class MainActivity : Activity() {
             val now = SystemClock.elapsedRealtime()
             if (now - lastReportMs >= 500L) {
                 lastReportMs = now
-                report("🌌 Dreamscape Hand｜Phase 2.1.1 诊断\n" + value)
+                report("🌌 Dreamscape Hand｜Phase 2.1.2 同帧实验\n" + value)
             }
         }
     }
