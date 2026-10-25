@@ -6,11 +6,11 @@ android {
     namespace = "com.dreamscape.hand.phase21"
     compileSdk = 35
     defaultConfig {
-        applicationId = "com.dreamscape.hand.phase21.sync"
+        applicationId = "com.dreamscape.hand.phase21.assoc"
         minSdk = 24
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.2.1.2-same-frame"
+        versionCode = 4
+        versionName = "0.2.1.3-frame-association"
     }
     buildTypes { getByName("release") { isMinifyEnabled = false } }
     compileOptions {
