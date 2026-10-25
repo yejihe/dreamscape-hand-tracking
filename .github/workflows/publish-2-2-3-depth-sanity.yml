@@ -1,0 +1,78 @@
+name: Publish Dreamscape Hand 2.2.3 near-hand depth diagnostic APK
+on:
+  push:
+    branches:
+      - experiment/phase2-2-depth-validation
+    paths:
+      - .github/workflows/publish-2-2-3-depth-sanity.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+  pages: write
+
+jobs:
+  publish:
+    if: github.repository == 'yejihe/dreamscape-hand-tracking'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          path: pages-source
+          persist-credentials: true
+      - name: Check successful Android CI and acquire ARM64 debug APK
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          BUILD_RUN_ID=40157949978
+          gh run view "$BUILD_RUN_ID" --repo "$GITHUB_REPOSITORY" --json conclusion --jq '.conclusion' | grep -x success
+          gh run download "$BUILD_RUN_ID" --repo "$GITHUB_REPOSITORY" --name dreamscape-hand-phase21-debug-apk --dir "$RUNNER_TEMP/package"
+          test -s "$RUNNER_TEMP/package/app-debug.apk"
+          unzip -l "$RUNNER_TEMP/package/app-debug.apk" | grep -q 'lib/arm64-v8a/'
+          sha256sum "$RUNNER_TEMP/package/app-debug.apk"
+      - name: Attach diagnostic APK to a prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG=v0.2.2.3-depth-sanity-test
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 || \
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target experiment/phase2-2-depth-validation \
+            --title 'Dreamscape Hand Phase 2.2.3 · depth sanity diagnostics' \
+            --notes 'EXPERIMENTAL ARM64 APK. Shows actual unfiltered scene depth, rejects implausible near-hand values (e.g. 18.639m), compares with non-calibrated palm-width proxy. Not true 3D finger tracking.' \
+            --prerelease --latest=false
+          gh release upload "$TAG" "$RUNNER_TEMP/package/app-debug.apk#Dreamscape-Hand-2.2.3-arm64.apk" \
+            --repo "$GITHUB_REPOSITORY" --clobber
+      - name: Publish single-click APK on existing GitHub Pages
+        working-directory: pages-source
+        run: |
+          set -euo pipefail
+          mkdir -p downloads
+          cp "$RUNNER_TEMP/package/app-debug.apk" downloads/Dreamscape-Hand-2.2.3-arm64.apk
+          cat > downloads/index.html <<'HTML'
+          <!doctype html>
+          <html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+          <title>Dreamscape Hand 下载</title>
+          <style>body{font-family:system-ui,sans-serif;max-width:580px;margin:7vh auto;padding:20px;color:#eef;background:#081b2e;line-height:1.6}a{display:block;margin:15px 0;border-radius:12px;padding:17px;color:#071a27;background:#9bedf1;text-align:center;font-size:17px;font-weight:bold}small{display:block;margin-top:22px;color:#ccd}</style>
+          <h1>🌌 Dreamscape Hand</h1>
+          <p>🧪 Phase 2.2.3：深度可信度验证（ARM64 Android / vivo S30）</p>
+          <a href="./Dreamscape-Hand-2.2.3-arm64.apk" download>下载 2.2.3 深度诊断 APK</a>
+          <p>📎 旧版 2.2.1：已能识别手指，但场景深度异常。</p>
+          <a href="./Dreamscape-Hand-2.2.1-arm64.apk" download>下载 2.2.1 旧版</a>
+          <small>实验包，不是成熟三维空间绘画。2.2.3会提示18m等不合理深度，手宽法仅供对照，不代表实际指尖Z值。安装前请留存已能运行的旧版。</small>
+          </html>
+          HTML
+          git config user.name dreamscape-ci
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add downloads
+          git commit -m 'Publish Phase 2.2.3 near-hand depth diagnostic to Pages'
+          git push origin HEAD:main
+      - name: Request Pages branch rebuild
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/pages/builds" --jq '{status: .status, url: .url}'
