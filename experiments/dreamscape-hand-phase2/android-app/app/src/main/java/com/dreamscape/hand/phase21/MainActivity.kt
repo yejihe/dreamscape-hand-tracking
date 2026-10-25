@@ -28,6 +28,8 @@ import com.google.mediapipe.tasks.core.BaseOptions
 import com.google.mediapipe.tasks.vision.core.RunningMode
 import com.google.mediapipe.tasks.vision.handlandmarker.HandLandmarker
 import java.util.Locale
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
@@ -43,7 +45,12 @@ class MainActivity : Activity() {
     @Volatile private var depthSupported = false
     @Volatile private var arSession: Session? = null
     private var installRequested = false
-    private var processor: SyncedHandFrameProcessor? = null
+    private var processor: AsyncHandFrames? = null
+    private val inferWorker = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "dreamscape-mediapipe-worker")
+    }
+    private val inferenceBusy = AtomicBoolean(false)
+    @Volatile private var active = false
     private var landmarker: HandLandmarker? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -55,7 +62,7 @@ class MainActivity : Activity() {
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         }
         statusLabel = TextView(this).apply {
-            text = "🌌 Phase 2.2｜等待 ARCore 摄像头…\n绿色骨架、粉色指尖用于2D对齐测试；深度未验证"
+            text = "🌌 Phase 2.2.2｜等待 ARCore 摄像头…\n绿色骨架、粉色指尖用于2D对齐测试；深度未验证"
             textSize = 14f
             setTextColor(Color.WHITE)
             setBackgroundColor(0xD9092035.toInt())
@@ -121,9 +128,10 @@ class MainActivity : Activity() {
                     .setMinTrackingConfidence(0.5f)
                     .build()
                 landmarker = HandLandmarker.createFromOptions(this, options)
-                processor = SyncedHandFrameProcessor(requireNotNull(landmarker))
+                processor = AsyncHandFrames(requireNotNull(landmarker))
             }
             arSession?.resume()
+            active = true
             glView.onResume()
         } catch (e: Exception) {
             report("原生启动失败：${e.javaClass.simpleName}\n${e.message ?: "未知错误"}")
@@ -141,17 +149,22 @@ class MainActivity : Activity() {
     }
 
     override fun onPause() {
+        active = false
         if (::glView.isInitialized) glView.onPause()
         arSession?.pause()
         super.onPause()
     }
 
     override fun onDestroy() {
+        active = false
         arSession?.close()
         arSession = null
-        landmarker?.close()
-        landmarker = null
         processor = null
+        // Any pending infer() completes before model closure on its single worker.
+        val toClose = landmarker
+        landmarker = null
+        inferWorker.execute { toClose?.close() }
+        inferWorker.shutdown()
         super.onDestroy()
     }
 
@@ -188,6 +201,7 @@ class MainActivity : Activity() {
             GLES20.glClear(GLES20.GL_COLOR_BUFFER_BIT or GLES20.GL_DEPTH_BUFFER_BIT)
             val session = arSession ?: return
             val background = preview ?: return
+            if (!active) return
             try {
                 if (!textureBound) {
                     session.setCameraTextureName(background.textureId)
@@ -198,96 +212,81 @@ class MainActivity : Activity() {
                 session.setDisplayGeometry(windowManager.defaultDisplay.rotation, width, height)
                 val frame = session.update()
                 background.draw(frame)
-                val glErr = GLES20.glGetError()
                 val frameNs = frame.timestamp
                 val camera = frame.camera
                 val tracking = camera.trackingState
-                val failure = camera.trackingFailureReason
-                val repeats = frameNs == lastFrameTimestamp
-                lastFrameTimestamp = frameNs
 
-                // The old app merely displayed "not TRACKING". That masked
-                // whether the camera never produced images, or visual SLAM had
-                // insufficient light/features, or a competing app used the camera.
+                // Camera preview no longer waits for MediaPipe's 150ms inference.
                 if (tracking != TrackingState.TRACKING) {
-                    runOnUiThread { handOverlay.setPoints(null) }
                     val now = SystemClock.elapsedRealtime()
-                    if (frameNs > 0 && now - lastCpuProbeMs > 1600) {
-                        lastCpuProbeMs = now
-                        cpuProbe = try {
-                            frame.acquireCameraImage().use { im ->
-                                "CPU图像：可读 ${im.width}×${im.height} / t=${im.timestamp}"
-                            }
-                        } catch (e: NotYetAvailableException) {
-                            "CPU图像：尚未就绪"
-                        } catch (e: Exception) {
-                            "CPU图像：${e.javaClass.simpleName}"
-                        }
-                    }
-                    val advice = when (failure) {
-                        TrackingFailureReason.INSUFFICIENT_LIGHT -> "请打开灯光，检查系统相机总开关"
-                        TrackingFailureReason.INSUFFICIENT_FEATURES -> "对准桌面等有纹理物体，缓慢移动手机"
-                        TrackingFailureReason.EXCESSIVE_MOTION -> "请减慢手机移动速度"
-                        TrackingFailureReason.CAMERA_UNAVAILABLE -> "请关闭其他使用摄像头的应用"
-                        TrackingFailureReason.BAD_STATE -> "ARCore内部状态异常，重新进入应用"
-                        TrackingFailureReason.NONE -> "正在初始化；保持手机稳定，对准明亮有纹理的场景"
-                    }
-                    update("追踪：${tracking}｜原因：${failure}\n帧时间戳：${frameNs} ${if(repeats) "(重复帧)" else ""}\n${cpuProbe}\nOpenGL错误码：${glErr}\n${advice}\n⚠ 未定位手指")
-                    return
-                }
-                if (frameNs == 0L || (lastSampleNs > 0 && frameNs - lastSampleNs < 120_000_000L))
-                    return
-                lastSampleNs = frameNs
-                val worker = processor ?: return
-                val outcome = worker.process(frame)
-                when (outcome) {
-                    is SyncedHandFrameProcessor.Outcome.Skipped -> {
-                        skipped++
+                    if (now - lastReportMs > 800) {
                         runOnUiThread { handOverlay.setPoints(null) }
-                        update("已追踪，但还未完成同帧检测：${outcome.reason}\n帧=${frameNs}｜OpenGL=${glErr}")
+                        update("ARCore追踪状态：${tracking}｜原因：${camera.trackingFailureReason}\n" +
+                            "画面仍正常刷新，正在等待空间追踪")
                     }
-                    is SyncedHandFrameProcessor.Outcome.Captured -> {
-                        captured++
-                        val sample = outcome.sample
-                        val hand = sample.landmarks.landmarks().firstOrNull()
-                        val p = sample.translation
-                        if (hand != null && hand.size >= 21) {
-                            val cpuPoints = FloatArray(42) { idx ->
-                                if (idx % 2 == 0) hand[idx / 2].x() else hand[idx / 2].y()
-                            }
-                            val viewPoints = FloatArray(42)
-                            // MediaPipe normalized points come from the raw CPU camera image.
-                            // ARCore handles portrait rotation and preview crop.
-                            frame.transformCoordinates2d(
-                                Coordinates2d.IMAGE_NORMALIZED, cpuPoints,
-                                Coordinates2d.VIEW, viewPoints)
-                            runOnUiThread { handOverlay.setPoints(viewPoints) }
-                        } else {
-                            runOnUiThread { handOverlay.setPoints(null) }
-                        }
-                        val tip = hand?.getOrNull(8)
-                        val depthText = if (!depthSupported) "Depth API: 不支持"
-                            else if (tip == null) "Depth API: 待手进入画面"
-                            else FingertipDepthProbe.sample(frame, tip.x(), tip.y()).summary
-                        Log.d("DreamscapePhase22",
-                            "processed=${captured}; hand=${hand?.size ?: 0}; imageCameraOffsetNs=${sample.cameraImageOffsetNs}; ${depthText}")
-                        update(String.format(Locale.US,
-                            "📍手：%d｜图像已处理：%d｜跳过 %d\n相机 XYZ：%.2f, %.2f, %.2f m\n食指图像坐标：(%.3f, %.3f)\n%s\n推理耗时：%dms｜图像相机偏移：%.2fms\n粉点=食指8号点；绿色=骨架（2D对齐待实测）\n⚠场景深度≠已验证指尖深度，尚未实现三维绘画",
-                            sample.landmarks.landmarks().size, captured, skipped,
-                            p[0], p[1], p[2], tip?.x() ?: -1f, tip?.y() ?: -1f,
-                            depthText, sample.processingMs,
-                            sample.cameraImageOffsetNs / 1_000_000.0))
-
-                    }
+                    return
                 }
-            } catch (e: NotYetAvailableException) {
-                update("ARCore 图像暂不可用：继续等待")
-            } catch (e: ResourceExhaustedException) {
-                update("CPU 图像缓冲不足，继续等待")
+                if (frameNs <= 0 ||
+                    (lastSampleNs > 0 && frameNs - lastSampleNs < 75_000_000L))
+                    return
+                if (!inferenceBusy.compareAndSet(false, true)) return
+                val engine = processor
+                if (engine == null) {
+                    inferenceBusy.set(false)
+                    return
+                }
+                lastSampleNs = frameNs
+                try {
+                    // ARCore Session + Frame + Image remain on this GL thread.
+                    // Copy raw byte planes and exact camera pose/intrinsics before
+                    // advancing the Session or returning to the next GL frame.
+                    val packet = engine.capture(frame, depthSupported)
+                    inferWorker.execute {
+                        try {
+                            val result = engine.analyze(packet)
+                            if (active) runOnUiThread {
+                                if (active) {
+                                    captured++
+                                    handOverlay.setPoints(result.landmarkPointsInView)
+                                    val tip = result.tip
+                                    val p = result.packet
+                                    val tipText = if (tip == null) "未检测到手"
+                                        else String.format(Locale.US,
+                                            "(%.3f, %.3f)", tip[0], tip[1])
+                                    val msg = String.format(Locale.US,
+                                        "📍手：%d｜处理：%d 帧｜跳过：%d\n" +
+                                        "指尖二维位置：%s\n" +
+                                        "%s\n" +
+                                        "MediaPipe推理：%dms｜结果年龄：%dms\n" +
+                                        "相机XYZ(米)：%.2f, %.2f, %.2f\n" +
+                                        "相机-图像时间差：%.2fms\n" +
+                                        "摄像头与识别分线程，避免画面被推理阻塞。\n" +
+                                        "⚠ 深度候选非可靠手指深度，未完成三维绘画",
+                                        result.handCount, captured, skipped, tipText,
+                                        result.depthText, result.inferenceMs, result.resultAgeMs,
+                                        p.worldCamera[0], p.worldCamera[1],
+                                        p.worldCamera[2], (p.imageNs - p.cameraNs) / 1_000_000.0)
+                                    report("🌌 Dreamscape Hand｜Phase 2.2.2 流畅度实验\n" + msg)
+                                }
+                            }
+                        } catch (e: Exception) {
+                            if (active) report("手部识别线程错误：${e.javaClass.simpleName}: ${e.message}")
+                        } finally {
+                            inferenceBusy.set(false)
+                        }
+                    }
+                } catch (e: NotYetAvailableException) {
+                    inferenceBusy.set(false)
+                    update("相机/深度暂未就绪：继续等待")
+                } catch (e: Exception) {
+                    inferenceBusy.set(false)
+                    skipped++
+                    update("图像采集出错：${e.javaClass.simpleName}: ${e.message}")
+                }
             } catch (e: CameraNotAvailableException) {
-                update("ARCore 相机已不可用：${e.message}")
+                update("ARCore相机不可用：${e.message}")
             } catch (e: Exception) {
-                update("Phase 2.1 错误：${e.javaClass.simpleName}：${e.message}")
+                update("ARCore渲染错误：${e.javaClass.simpleName}: ${e.message}")
             }
         }
 
