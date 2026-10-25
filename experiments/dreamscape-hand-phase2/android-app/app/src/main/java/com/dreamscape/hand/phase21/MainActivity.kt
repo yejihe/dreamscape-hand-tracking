@@ -9,6 +9,10 @@ import android.opengl.GLSurfaceView
 import android.os.Bundle
 import android.os.SystemClock
 import android.view.Gravity
+import android.view.WindowInsets
+import android.os.Build
+import com.google.ar.core.TrackingState
+import com.google.ar.core.TrackingFailureReason
 import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.TextView
@@ -46,7 +50,7 @@ class MainActivity : Activity() {
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         }
         statusLabel = TextView(this).apply {
-            text = "🌌 Phase 2.1｜等待 ARCore 摄像头…\n只测同帧手部关键点 + 位姿；未实现指尖三维深度"
+            text = "🌌 Phase 2.1.1｜等待 ARCore 摄像头…\n仅诊断摄像头和同帧追踪，非三维绘画"
             textSize = 14f
             setTextColor(Color.WHITE)
             setBackgroundColor(0xD9092035.toInt())
@@ -57,6 +61,18 @@ class MainActivity : Activity() {
         val params = FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
             ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP)
         root.addView(statusLabel, params)
+        // Android 15+ edge-to-edge: keep diagnostic text out of the status bar.
+        root.setOnApplyWindowInsetsListener { _, insets ->
+            val top = if (Build.VERSION.SDK_INT >= 30)
+                insets.getInsets(WindowInsets.Type.statusBars() or WindowInsets.Type.displayCutout()).top
+            else @Suppress("DEPRECATION") insets.systemWindowInsetTop
+            val lp = statusLabel.layoutParams as FrameLayout.LayoutParams
+            if (lp.topMargin != top) {
+                lp.topMargin = top
+                statusLabel.layoutParams = lp
+            }
+            insets
+        }
         setContentView(root)
     }
 
@@ -138,6 +154,9 @@ class MainActivity : Activity() {
         private var lastReportMs = 0L
         private var captured = 0
         private var skipped = 0
+        private var lastFrameTimestamp = -1L
+        private var lastCpuProbeMs = 0L
+        private var cpuProbe = "CPU图像：尚未测试"
 
         override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
             preview = CameraBackground()
@@ -165,8 +184,42 @@ class MainActivity : Activity() {
                 session.setDisplayGeometry(windowManager.defaultDisplay.rotation, width, height)
                 val frame = session.update()
                 background.draw(frame)
-
+                val glErr = GLES20.glGetError()
                 val frameNs = frame.timestamp
+                val camera = frame.camera
+                val tracking = camera.trackingState
+                val failure = camera.trackingFailureReason
+                val repeats = frameNs == lastFrameTimestamp
+                lastFrameTimestamp = frameNs
+
+                // The old app merely displayed "not TRACKING". That masked
+                // whether the camera never produced images, or visual SLAM had
+                // insufficient light/features, or a competing app used the camera.
+                if (tracking != TrackingState.TRACKING) {
+                    val now = SystemClock.elapsedRealtime()
+                    if (frameNs > 0 && now - lastCpuProbeMs > 1600) {
+                        lastCpuProbeMs = now
+                        cpuProbe = try {
+                            frame.acquireCameraImage().use { im ->
+                                "CPU图像：可读 ${im.width}×${im.height} / t=${im.timestamp}"
+                            }
+                        } catch (e: NotYetAvailableException) {
+                            "CPU图像：尚未就绪"
+                        } catch (e: Exception) {
+                            "CPU图像：${e.javaClass.simpleName}"
+                        }
+                    }
+                    val advice = when (failure) {
+                        TrackingFailureReason.INSUFFICIENT_LIGHT -> "请打开灯光，检查系统相机总开关"
+                        TrackingFailureReason.INSUFFICIENT_FEATURES -> "对准桌面等有纹理物体，缓慢移动手机"
+                        TrackingFailureReason.EXCESSIVE_MOTION -> "请减慢手机移动速度"
+                        TrackingFailureReason.CAMERA_UNAVAILABLE -> "请关闭其他使用摄像头的应用"
+                        TrackingFailureReason.BAD_STATE -> "ARCore内部状态异常，重新进入应用"
+                        TrackingFailureReason.NONE -> "正在初始化；保持手机稳定，对准明亮有纹理的场景"
+                    }
+                    update("追踪：${tracking}｜原因：${failure}\n帧时间戳：${frameNs} ${if(repeats) "(重复帧)" else ""}\n${cpuProbe}\nOpenGL错误码：${glErr}\n${advice}\n⚠ 未定位手指")
+                    return
+                }
                 if (frameNs == 0L || (lastSampleNs > 0 && frameNs - lastSampleNs < 120_000_000L))
                     return
                 lastSampleNs = frameNs
@@ -175,7 +228,7 @@ class MainActivity : Activity() {
                 when (outcome) {
                     is SyncedHandFrameProcessor.Outcome.Skipped -> {
                         skipped++
-                        update("跳过：${outcome.reason}")
+                        update("已追踪，图像检测跳过：${outcome.reason}\n帧=${frameNs}｜OpenGL=${glErr}")
                     }
                     is SyncedHandFrameProcessor.Outcome.Captured -> {
                         captured++
@@ -207,7 +260,7 @@ class MainActivity : Activity() {
             val now = SystemClock.elapsedRealtime()
             if (now - lastReportMs >= 500L) {
                 lastReportMs = now
-                report("🌌 Dreamscape Hand｜Phase 2.1\n" + value)
+                report("🌌 Dreamscape Hand｜Phase 2.1.1 诊断\n" + value)
             }
         }
     }
