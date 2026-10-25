@@ -6,11 +6,11 @@ android {
     namespace = "com.dreamscape.hand.phase21"
     compileSdk = 35
     defaultConfig {
-        applicationId = "com.dreamscape.hand.phase22.async"
+        applicationId = "com.dreamscape.hand.phase22.depthcheck"
         minSdk = 24
         targetSdk = 35
-        versionCode = 6
-        versionName = "0.2.2.2-async-preview"
+        versionCode = 7
+        versionName = "0.2.2.3-depth-sanity"
         // Vivo S30 is ARM64. Exclude x86/x86_64/32-bit native MediaPipe
         // binaries from a device-specific TEST build to reduce mobile data.
         ndk { abiFilters += listOf("arm64-v8a") }
