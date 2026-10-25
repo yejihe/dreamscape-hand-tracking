@@ -25,6 +25,7 @@ class SyncedHandFrameProcessor(private val landmarker: HandLandmarker) {
         val frameTimestampNs: Long,
         val androidCameraTimestampNs: Long,
         val imageTimestampNs: Long,
+        val cameraImageOffsetNs: Long,
         val detectorTimestampMs: Long,
         val imageWidth: Int,
         val imageHeight: Int,
@@ -56,21 +57,23 @@ class SyncedHandFrameProcessor(private val landmarker: HandLandmarker) {
 
         // acquireCameraImage() may legitimately fail with NotYetAvailableException.
         // The outer caller should catch/log recoverable ARCore exceptions.
-        // ARCore Frame.timestamp and the Android Camera timestamp are not
-        // guaranteed to be from the same clock domain. The returned Android
-        // Image's timestamp belongs to Android Camera. Compare the latter
-        // with Frame.getAndroidCameraTimestamp(), NOT Frame.getTimestamp().
+        // ARCore Frame.acquireCameraImage() returns the CPU camera image
+        // corresponding to THIS Frame, as documented by the ARCore API.
+        // Do NOT require Image.timestamp == Frame.androidCameraTimestamp:
+        // real vivo S30 measurements showed ~9.76ms offset. The exact timestamp
+        // equality is NOT promised by the API, and rejecting all such images
+        // prevented MediaPipe from ever running.
+        // Keep both timestamps for diagnostics; this is an API-associated
+        // frame, NOT proven sub-millisecond hardware synchronisation.
         val androidCameraNs = frame.androidCameraTimestamp
         val image = frame.acquireCameraImage()
         image.use {
             if (it.format != android.graphics.ImageFormat.YUV_420_888)
                 return Outcome.Skipped("unexpected image format")
-            if (androidCameraNs <= 0L || it.timestamp <= 0L)
+            if (it.timestamp <= 0L || androidCameraNs <= 0L)
                 return Outcome.Skipped(
-                    "timestamp unavailable; frame=$frameNs camera=$androidCameraNs image=${it.timestamp}")
-            if (it.timestamp != androidCameraNs)
-                return Outcome.Skipped(
-                    "camera/image timestamp mismatch; frame=$frameNs camera=$androidCameraNs image=${it.timestamp} Δ=${it.timestamp - androidCameraNs}ns")
+                    "camera/image timestamp unavailable; frame=$frameNs camera=$androidCameraNs image=${it.timestamp}")
+            val offsetNs = it.timestamp - androidCameraNs
             // Use the ARCore Frame timestamp as monotonically increasing
             // inference clock. The ORIGINAL image and pose both come from
             // this specific ARCore Frame. Never pair against "latest" pose.
@@ -97,7 +100,7 @@ class SyncedHandFrameProcessor(private val landmarker: HandLandmarker) {
             previousDetectorMs = timestampMs
 
             return Outcome.Captured(
-                Sample(frameNs, androidCameraNs, it.timestamp, timestampMs, it.width, it.height,
+                Sample(frameNs, androidCameraNs, it.timestamp, offsetNs, timestampMs, it.width, it.height,
                     focal[0], focal[1], center[0], center[1],
                     pose.translation.copyOf(), pose.rotationQuaternion.copyOf(),
                     result, duration)
