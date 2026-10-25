@@ -4,6 +4,7 @@ on:
     branches:
       - experiment/phase2-1-arcore-mediapipe-sync
       - experiment/phase2-2-depth-probe
+      - experiment/phase2-2-async-performance
     paths:
       - 'experiments/dreamscape-hand-phase2/android-app/**'
       - '.github/workflows/phase21-android-build.yml'
