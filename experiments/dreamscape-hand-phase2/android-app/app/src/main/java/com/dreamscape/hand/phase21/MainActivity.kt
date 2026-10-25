@@ -50,7 +50,7 @@ class MainActivity : Activity() {
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         }
         statusLabel = TextView(this).apply {
-            text = "🌌 Phase 2.1.2｜等待 ARCore 摄像头…\n仅诊断摄像头和同帧追踪，非三维绘画"
+            text = "🌌 Phase 2.1.3｜等待 ARCore 摄像头…\n仅诊断摄像头和同帧追踪，非三维绘画"
             textSize = 14f
             setTextColor(Color.WHITE)
             setBackgroundColor(0xD9092035.toInt())
@@ -239,11 +239,12 @@ class MainActivity : Activity() {
                         val tipText = if (tip == null) "没有识别到手"
                           else String.format(Locale.US, "食指图像归一化坐标 (%.3f, %.3f)", tip.x(), tip.y())
                         update(String.format(Locale.US,
-                            "同帧校验通过：%d 帧｜跳过 %d\n手部数 %d ｜ %s\n相机 XYZ (米): %.2f, %.2f, %.2f\n图像 %dx%d｜推理 %dms\nFrame时间戳：%d\nAndroid相机时间戳：%d\nCPU图像时间戳：%d\n⚠ 尚无手指深度，不能称为三维手指定位",
+                            "ARCore关联图像已处理：%d 帧｜跳过 %d\n手部数 %d ｜ %s\n相机 XYZ (米): %.2f, %.2f, %.2f\n图像 %dx%d｜推理 %dms\nFrame时间戳：%d\nAndroid相机时间戳：%d\nCPU图像时间戳：%d\n相机-图像时间偏移：%.2fms（非严格硬件同步）\n⚠ 尚无手指深度，不能称为三维手指定位",
                             captured, skipped, hands, tipText, p[0], p[1], p[2],
                             sample.imageWidth, sample.imageHeight,
                             sample.processingMs, sample.frameTimestampNs,
-                            sample.androidCameraTimestampNs, sample.imageTimestampNs))
+                            sample.androidCameraTimestampNs, sample.imageTimestampNs,
+                            sample.cameraImageOffsetNs / 1_000_000.0))
                     }
                 }
             } catch (e: NotYetAvailableException) {
@@ -261,7 +262,7 @@ class MainActivity : Activity() {
             val now = SystemClock.elapsedRealtime()
             if (now - lastReportMs >= 500L) {
                 lastReportMs = now
-                report("🌌 Dreamscape Hand｜Phase 2.1.2 同帧实验\n" + value)
+                report("🌌 Dreamscape Hand｜Phase 2.1.3 图像关联实验\n" + value)
             }
         }
     }
