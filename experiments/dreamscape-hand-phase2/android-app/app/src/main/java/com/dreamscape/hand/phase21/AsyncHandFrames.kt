@@ -88,6 +88,9 @@ internal class AsyncHandFrames(private val detector: HandLandmarker) {
             }
         } catch (_: NotYetAvailableException) {
             null
+        } catch (_: Exception) {
+            // Depth failures must not stop hand tracking.
+            null
         }
 
         val cameraNs = frame.androidCameraTimestamp
