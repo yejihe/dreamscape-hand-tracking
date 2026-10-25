@@ -10,7 +10,10 @@ android {
         minSdk = 24
         targetSdk = 35
         versionCode = 5
-        versionName = "0.2.2.0-depth-probe"
+        versionName = "0.2.2.1-arm64-compact"
+        // Vivo S30 is ARM64. Exclude x86/x86_64/32-bit native MediaPipe
+        // binaries from a device-specific TEST build to reduce mobile data.
+        ndk { abiFilters += listOf("arm64-v8a") }
     }
     buildTypes { getByName("release") { isMinifyEnabled = false } }
     compileOptions {
